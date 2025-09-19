@@ -1,7 +1,9 @@
+# kb_seed.py  (Qdrant-only retriever via factory)
+from typing import List, Dict
+from db import init_schema, insert_playbooks, fetch_playbooks
+from retrievers.factory import get_retriever
 
-from db import init_schema, insert_playbooks
-from retrieval import rebuild_index
-
+# Your sample playbooks (unchanged)
 SAMPLE_PLAYBOOKS = [
     dict(title="Duplicate Email on Contact", signature="DUPLICATE_VALUE Contact.Email", body="""
 Diagnosis: A duplicate rule or matching rule blocked Contact creation due to an existing email.
@@ -34,8 +36,42 @@ Diagnosis: A concurrent transaction holds a lock on the same record.
 """),
 ]
 
+def _to_text(row: Dict) -> str:
+    """Flatten title/signature/body into a single passage for embedding."""
+    parts: List[str] = []
+    t = (row.get("title") or "").strip()
+    s = (row.get("signature") or "").strip()
+    b = (row.get("body") or "").strip()
+    if t: parts.append(f"Title: {t}")
+    if s: parts.append(f"Signature: {s}")
+    if b: parts += ["Body:", b]
+    return "\n".join(parts)
+
 if __name__ == "__main__":
+    # 1) seed DB
     init_schema()
     insert_playbooks(SAMPLE_PLAYBOOKS)
-    rebuild_index()
-    print("Seeded playbooks and built HNSW index at index/kb.index")
+
+    # 2) read rows back and upsert into Qdrant via the retriever factory
+    rows = fetch_playbooks()  # [{id, title, signature, body, ...}]
+    if not rows:
+        raise SystemExit("No playbooks found after insert_playbooks().")
+
+    retriever = get_retriever()  # currently returns QdrantRetriever
+    chunks = []
+    for r in rows:
+        text = _to_text(r)
+        chunks.append({
+            "id": r.get("id"),  # optional stable id for idempotency
+            "text": text,
+            "meta": {
+                "source_id": "kb",
+                "chunk_id": r.get("id"),
+                "version": "kb@v1",
+                # add org-scoping later if needed: "org_id": "global"
+            }
+        })
+
+    n = retriever.upsert(chunks)
+    print(f"Seeded {len(rows)} playbooks and upserted {n} chunks into Qdrant collection.")
+

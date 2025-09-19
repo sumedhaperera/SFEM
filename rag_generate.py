@@ -1,8 +1,9 @@
-
+# rag_generate.py (Qdrant via retriever factory; no FAISS)
 import argparse, json, re
+from typing import List, Tuple
 from config import OPENAI_API_KEY, OPENAI_MODEL, TOP_K
 from db import list_recent_errors
-from retrieval import search as search_playbooks
+from retrievers.factory import get_retriever
 import httpx
 
 PROMPT_TMPL = """You are a Salesforce Flow incident assistant.
@@ -19,6 +20,7 @@ Knowledge:
 Respond in plain text with a 'Diagnosis:' line and a 'Next steps:' list.
 """
 
+# ---- LLM call
 def call_llm(prompt: str) -> str:
     if not OPENAI_API_KEY:
         raise RuntimeError("Missing OPENAI_API_KEY")
@@ -34,7 +36,8 @@ def call_llm(prompt: str) -> str:
     )
     return resp.choices[0].message.content
 
-def local_fallback_generate(hits):
+# ---- Fallback using top retrieved snippet
+def local_fallback_generate(hits: List[Tuple[int, float, str]]) -> str:
     top_text = hits[0][2] if hits else ""
     diagnosis = ""
     steps = []
@@ -55,6 +58,7 @@ def local_fallback_generate(hits):
         f"Next steps:\n" + "\n".join([f"{i+1}. {s}" for i, s in enumerate(steps[:6])])
     )
 
+# ---- Query builder stays as-is
 def build_query(ctx):
     sig_guess = ctx.get("error_message","").split(":",1)[0].split(" on ")[0]
     return f"{sig_guess} {ctx.get('flow_name')} v{ctx.get('flow_version')} element {ctx.get('flow_element')} :: {ctx.get('error_message')}"
@@ -67,6 +71,8 @@ def main():
     rows = list_recent_errors(limit=args.limit)
     if not rows:
         print("No errors in DB. Run seed_sample_errors.py first."); return
+
+    retriever = get_retriever()  # QdrantRetriever (factory)
 
     for r in rows:
         ctx = {
@@ -83,10 +89,17 @@ def main():
         print("-"*80)
 
         query = build_query(ctx)
-        hits = search_playbooks(query, k=TOP_K)
 
-        knowledge = "\n\n".join([t for _,_,t in hits][:5])
-        prompt = PROMPT_TMPL.format(error_context=json.dumps(ctx, indent=2), knowledge=knowledge)
+        # Qdrant search via factory (tenant-aware if you set org_id during upsert)
+        hits: List[Tuple[int, float, str]] = retriever.search(
+            query=query,
+            top_k=TOP_K,
+            org_id=ctx["org_id"],         # use filters if you upserted with org_id
+            extra_filters=None             # e.g., {"object": "Contact", "field": "Email"}
+        )
+
+        knowledge = "\n\n".join([t for (_,_,t) in hits][:5]) if hits else ""
+        prompt = PROMPT_TMPL.format(error_context=json.dumps(ctx, indent=2), knowledge=knowledge or "No snippets retrieved.")
 
         try:
             out = call_llm(prompt)
