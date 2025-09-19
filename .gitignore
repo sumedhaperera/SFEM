@@ -3,5 +3,5 @@ index/
 data/
 .venv/
 __pycache__/
-.env/
+.env
 *.pyc
