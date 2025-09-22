@@ -1,9 +1,9 @@
 # rag_generate.py (Qdrant via retriever factory; no FAISS)
 import argparse, json, re
 from typing import List, Tuple
-from config import OPENAI_API_KEY, OPENAI_MODEL, TOP_K
-from db import list_recent_errors
-from retrievers.factory import get_retriever
+from src.config.config import OPENAI_API_KEY, OPENAI_MODEL, TOP_K
+from src.db.db import list_recent_errors
+from src.retrievers.factory import get_retriever
 import httpx
 
 PROMPT_TMPL = """You are a Salesforce Flow incident assistant.

@@ -1,7 +1,7 @@
 # kb_seed.py  (Qdrant-only retriever via factory)
 from typing import List, Dict
-from db import init_schema, insert_playbooks, fetch_playbooks
-from retrievers.factory import get_retriever
+from src.db.db import init_schema, insert_playbooks, fetch_playbooks
+from src.retrievers.factory import get_retriever
 
 # Your sample playbooks (unchanged)
 SAMPLE_PLAYBOOKS = [

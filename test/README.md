@@ -10,7 +10,7 @@ What it does:
 1. Checks Qdrant connectivity
 2. Seeds playbooks into the DB and upserts them to Qdrant
 3. Optionally indexes your PDFs into Qdrant (embedding done inside the retriever)
-4. Seeds sample errors from `sample_errors.jsonl` if present
+4. Seeds sample errors from `test/data/test/data/test/data/sample_errors.jsonl` if present
 5. Retrieves context and calls the LLM (falls back to local template if no API key)
 
 Env you should set:

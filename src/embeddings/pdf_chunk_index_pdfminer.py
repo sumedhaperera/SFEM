@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Tuple, Dict, Any
 
 from pdfminer.high_level import extract_text as pdfminer_extract_text
-from retrievers.factory import get_retriever
+from src.retrievers.factory import get_retriever
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):

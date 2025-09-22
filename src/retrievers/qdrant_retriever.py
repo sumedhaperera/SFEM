@@ -7,7 +7,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
 from .base import Retriever
-from embed import get_embedder
+from src.embeddings.embed import get_embedder
 
 # --- robust config import ---
 QDRANT_URL        = os.getenv("QDRANT_URL", "http://localhost:6333")

@@ -23,8 +23,8 @@ except Exception:
 
 # Project imports
 try:
-    from retrievers.factory import get_retriever
-    from db import init_schema, fetch_playbooks, insert_playbooks, list_recent_errors
+    from src.retrievers.factory import get_retriever
+    from src.db.db import init_schema, fetch_playbooks, insert_playbooks, list_recent_errors
 except Exception as e:
     print(f"[fatal] could not import project modules: {e}", file=sys.stderr)
     sys.exit(2)
@@ -140,7 +140,7 @@ def ensure_playbooks_seeded_and_indexed():
         rows = fetch_playbooks()
         print(f"[seed] inserted {len(rows)} sample playbooks")
     # Upsert to Qdrant
-    from retrievers.factory import get_retriever
+    from src.retrievers.factory import get_retriever
     r = get_retriever()
     chunks = []
     for row in rows:
@@ -202,9 +202,9 @@ def pdf_chunk_and_upsert(pdf_path: Path, doc_id: str, org_id: str = "global", ch
 
 def seed_sample_errors_if_present(root: Path):
     script = root / "seed_sample_errors.py"
-    jsonl = root / "sample_errors.jsonl"
+    jsonl = root / "test/data/test/data/test/data/sample_errors.jsonl"
     if not script.exists() or not jsonl.exists():
-        print("[warn] seed_sample_errors.py or sample_errors.jsonl not found — skipping error seeding")
+        print("[warn] seed_sample_errors.py or test/data/test/data/test/data/sample_errors.jsonl not found — skipping error seeding")
         return
     import subprocess
     cmd = [sys.executable, str(script), "--from-json", str(jsonl)]
