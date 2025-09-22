@@ -1,6 +1,6 @@
 
 import argparse, json
-from db import init_schema, insert_error
+from src.db.db import init_schema, insert_error
 
 def seed_from_json(path: str):
     init_schema()
@@ -24,6 +24,6 @@ def seed_from_json(path: str):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--from-json", required=True, help="Path to sample_errors.jsonl")
+    ap.add_argument("--from-json", required=True, help="Path to test/data/test/data/test/data/sample_errors.jsonl")
     args = ap.parse_args()
     seed_from_json(args.from_json)

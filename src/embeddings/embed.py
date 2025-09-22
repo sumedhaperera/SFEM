@@ -2,7 +2,7 @@
 from typing import List
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from config import EMBED_MODEL
+from src.config.config import EMBED_MODEL
 
 _model = None
 

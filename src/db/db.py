@@ -1,7 +1,7 @@
 
 import sqlite3, os
 from typing import Iterable, Dict, Any, List
-from config import DATA_DB
+from src.config.config import DATA_DB
 from typing import List, Dict
 def _conn():
     con = sqlite3.connect(DATA_DB)
