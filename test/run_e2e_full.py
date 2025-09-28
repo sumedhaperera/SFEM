@@ -201,10 +201,10 @@ def pdf_chunk_and_upsert(pdf_path: Path, doc_id: str, org_id: str = "global", ch
     return n
 
 def seed_sample_errors_if_present(root: Path):
-    script = root / "seed_sample_errors.py"
-    jsonl = root / "test/data/test/data/test/data/sample_errors.jsonl"
+    script = root / "scripts/seed_sample_errors.py"
+    jsonl = root / "test/data/sample_errors.jsonl"
     if not script.exists() or not jsonl.exists():
-        print("[warn] seed_sample_errors.py or test/data/test/data/test/data/sample_errors.jsonl not found — skipping error seeding")
+        print("[warn] seed_sample_errors.py or test/data/sample_errors.jsonl not found — skipping error seeding")
         return
     import subprocess
     cmd = [sys.executable, str(script), "--from-json", str(jsonl)]
@@ -249,7 +249,7 @@ def mitigate_errors(limit: int, org_id_override: str | None):
         knowledge = "\n\n".join([t for (_,_,t) in hits][:5]) if hits else ""
 
         prompt = PROMPT_TMPL.format(
-            error_context=json.dumps(ctx, indent=2),
+            error_context = json.dumps(ctx, indent=2, default=str),
             knowledge=knowledge or "No snippets retrieved."
         )
         try:

@@ -1,9 +1,23 @@
-
+# env/config
 python-dotenv==1.0.1
 pydantic==2.8.2
+
+# core math
 numpy==1.26.4
+
+# vector & embeddings
 faiss-cpu==1.8.0
 sentence-transformers==3.0.1
+
+# LLM client
 openai==1.40.0
 httpx<0.28
+
+# PDF parsing
 pdfminer.six
+
+# NEW: vector DB client (Qdrant)
+qdrant-client>=1.9,<2.0
+
+# NEW: Postgres driver w/ wheels (psycopg3)
+psycopg[binary,pool]>=3.1,<3.2

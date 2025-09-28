@@ -1,6 +1,6 @@
 # rag_generate.py (Qdrant via retriever factory; no FAISS)
 import argparse, json, re
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 from src.config.config import OPENAI_API_KEY, OPENAI_MODEL, TOP_K
 from src.db.db import list_recent_errors
 from src.retrievers.factory import get_retriever
@@ -59,13 +59,16 @@ def local_fallback_generate(hits: List[Tuple[int, float, str]]) -> str:
     )
 
 # ---- Query builder stays as-is
-def build_query(ctx):
-    sig_guess = ctx.get("error_message","").split(":",1)[0].split(" on ")[0]
+def build_query(ctx: Dict[str, Any]) -> str:
+    sig_guess = (ctx.get("error_message") or "").split(":",1)[0].split(" on ")[0]
     return f"{sig_guess} {ctx.get('flow_name')} v{ctx.get('flow_version')} element {ctx.get('flow_element')} :: {ctx.get('error_message')}"
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=5)
+    # NEW: accept (and effectively default to) including docs; keeps smoke test happy
+    ap.add_argument("--with-docs", action="store_true", default=True,
+                    help="Include retrieved doc chunks as context")
     args = ap.parse_args()
 
     rows = list_recent_errors(limit=args.limit)
@@ -75,17 +78,19 @@ def main():
     retriever = get_retriever()  # QdrantRetriever (factory)
 
     for r in rows:
+        # be defensive: use .get() to avoid KeyError if a field is missing
+        err_msg = r.get("error_message") or r.get("message") or ""
         ctx = {
-            "org_id": r["org_id"],
-            "flow_name": r["flow_name"],
-            "flow_version": r["flow_version"],
-            "flow_element": r["flow_element"],
-            "error_message": r["error_message"],
-            "created_at": r["created_at"],
+            "org_id": r.get("org_id"),
+            "flow_name": r.get("flow_name"),
+            "flow_version": r.get("flow_version"),
+            "flow_element": r.get("flow_element"),
+            "error_message": err_msg,
+            "created_at": r.get("created_at"),
         }
         print("="*80)
-        print(f"FLOW: {ctx['flow_name']} (v{ctx['flow_version']}) | ELEMENT: {ctx['flow_element']}")
-        print(f"ERROR: {ctx['error_message']}")
+        print(f"FLOW: {ctx.get('flow_name')} (v{ctx.get('flow_version')}) | ELEMENT: {ctx.get('flow_element')}")
+        print(f"ERROR: {ctx.get('error_message')}")
         print("-"*80)
 
         query = build_query(ctx)
@@ -94,12 +99,17 @@ def main():
         hits: List[Tuple[int, float, str]] = retriever.search(
             query=query,
             top_k=TOP_K,
-            org_id=ctx["org_id"],         # use filters if you upserted with org_id
-            extra_filters=None             # e.g., {"object": "Contact", "field": "Email"}
+            org_id=ctx.get("org_id"),    # use filters if you upserted with org_id
+            extra_filters=None            # e.g., {"object": "Contact", "field": "Email"}
         )
 
-        knowledge = "\n\n".join([t for (_,_,t) in hits][:5]) if hits else ""
-        prompt = PROMPT_TMPL.format(error_context=json.dumps(ctx, indent=2), knowledge=knowledge or "No snippets retrieved.")
+        # Include knowledge unless you later add a --no-docs toggle
+        knowledge = "\n\n".join([t for (_,_,t) in hits][:5]) if (args.with_docs and hits) else ""
+        prompt = PROMPT_TMPL.format(
+            # default=str handles datetime in created_at
+            error_context=json.dumps(ctx, indent=2, default=str),
+            knowledge=knowledge or "No snippets retrieved." if args.with_docs else "(docs not included).",
+        )
 
         try:
             out = call_llm(prompt)
