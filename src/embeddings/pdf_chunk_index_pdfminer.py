@@ -19,7 +19,7 @@ Env (from .env):
   EMBED_MODEL (default sentence-transformers/all-MiniLM-L6-v2)
 """
 
-import os
+import os, re
 import sys
 import json
 import argparse
@@ -43,7 +43,7 @@ from qdrant_client.models import (
 
 
 _NAMESPACE = uuid.UUID("800cd911-c69f-46d9-8407-2908c94a6d65")  # any fixed UUID
-
+USE_BACKEND = os.getenv("PDF_BACKEND", "pdfminer").lower()
 # -----------------------------
 # CLI
 # -----------------------------
@@ -58,19 +58,210 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--force", action="store_true", help="Re-index even if doc already present (deletes old points first)")
     return p.parse_args()
 
+# --- sentence-aware chunking (library-backed) -------------------------------
+import os, re
+
+# Choose how to chunk:
+#   CHUNK_MODE=sentence | paragraph | char   (default: char)
+CHUNK_MODE = os.getenv("CHUNK_MODE", "char").lower()
+
+# Which sentence splitter to use:
+#   SENT_SPLITTER=blingfire|pysbd|nltk|spacy|naive  (default: blingfire→pysbd→naive)
+SENT_SPLITTER = os.getenv("SENT_SPLITTER", "blingfire").lower()
+
+
+def split_into_sentences(text: str) -> list[str]:
+    """Return list of sentences using the requested backend, with graceful fallback."""
+    t = (text or "").strip()
+    if not t:
+        return []
+
+    if SENT_SPLITTER in ("blingfire", "auto"):
+        try:
+            from blingfire import text_to_sentences
+            # returns newline-separated sentences
+            return [s.strip() for s in text_to_sentences(t).splitlines() if s.strip()]
+        except Exception:
+            # fall through to next choice
+            pass
+
+    if SENT_SPLITTER in ("pysbd", "auto", "blingfire"):  # allow fallback chain
+        try:
+            import pysbd
+            seg = pysbd.Segmenter(language="en", clean=False)
+            return [s.strip() for s in seg.segment(t) if s.strip()]
+        except Exception:
+            pass
+
+    if SENT_SPLITTER in ("nltk",):
+        try:
+            import nltk
+            try:
+                _ = nltk.data.find("tokenizers/punkt")
+            except LookupError:
+                nltk.download("punkt", quiet=True)
+            from nltk.tokenize import sent_tokenize
+            return [s.strip() for s in sent_tokenize(t) if s.strip()]
+        except Exception:
+            pass
+
+    if SENT_SPLITTER in ("spacy",):
+        try:
+            import spacy
+            nlp = spacy.load("en_core_web_sm", disable=["tagger","parser","ner","lemmatizer"])
+            if "sentencizer" not in nlp.pipe_names:
+                nlp.add_pipe("sentencizer")
+            doc = nlp(t)
+            return [s.text.strip() for s in doc.sents if s.text.strip()]
+        except Exception:
+            pass
+
+    # Naive fallback
+    return [p.strip() for p in re.split(r"(?<=[.!?])\s+", t) if p.strip()]
+
+
+def chunk_text_sentence(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """
+    Pack sentences up to ~chunk_size characters.
+    Overlap = last sentence of previous chunk is carried to the next chunk if overlap > 0.
+    If a single sentence > chunk_size, char-slice it with a tiny internal overlap.
+    """
+    sents = split_into_sentences(text)
+    if not sents:
+        return []
+
+    chunks: list[str] = []
+    cur: list[str] = []
+
+    def cur_len_with(s: str) -> int:
+        return len(" ".join(cur)) + (1 if cur else 0) + len(s)
+
+    i = 0
+    while i < len(sents):
+        s = sents[i]
+        if len(s) <= chunk_size:
+            if not cur:
+                cur = [s]
+            elif cur_len_with(s) <= chunk_size:
+                cur.append(s)
+            else:
+                chunks.append(" ".join(cur))
+                cur = ([cur[-1]] if overlap > 0 else []) + [s]
+            i += 1
+            continue
+
+        # sentence too long -> char-slice with small internal overlap
+        rest = s
+        tail_ov = min(overlap, max(0, chunk_size // 10))  # small internal overlap
+        while len(rest) > chunk_size:
+            part = rest[:chunk_size]
+            if not cur:
+                chunks.append(part)
+            elif cur_len_with(part) <= chunk_size:
+                cur.append(part); chunks.append(" ".join(cur)); cur = ([cur[-1]] if overlap > 0 else [])
+            else:
+                chunks.append(" ".join(cur)); cur = ([cur[-1]] if overlap > 0 else []) + [part]
+            cut = chunk_size - tail_ov if tail_ov < chunk_size else chunk_size
+            rest = rest[cut:]
+        # leftover goes into current buffer
+        if rest:
+            if not cur:
+                cur = [rest]
+            elif cur_len_with(rest) <= chunk_size:
+                cur.append(rest)
+            else:
+                chunks.append(" ".join(cur))
+                cur = ([cur[-1]] if overlap > 0 else []) + [rest]
+        i += 1
+
+    if cur:
+        chunks.append(" ".join(cur))
+    return chunks
+
+
+# (optional) paragraph-first that uses sentences for long paragraphs
+def _normalize_ws(s: str) -> str:
+    return re.sub(r"[ \t]+", " ", s or "").strip()
+
+def chunk_text_paragraph(text: str, chunk_size: int, overlap: int) -> list[str]:
+    raw_paras = [p for p in re.split(r"\n{2,}", text or "") if p.strip()]
+    paras = [_normalize_ws(p) for p in raw_paras]
+    out: list[str] = []
+    cur: list[str] = []
+
+    def cur_len_with(p: str) -> int:
+        return len("\n\n".join(cur)) + (2 if cur else 0) + len(p)
+
+    for p in paras:
+        if len(p) <= chunk_size:
+            if not cur:
+                cur = [p]
+            elif cur_len_with(p) <= chunk_size:
+                cur.append(p)
+            else:
+                out.append("\n\n".join(cur))
+                cur = ([cur[-1]] if overlap > 0 else []) + [p]
+            continue
+        # paragraph too long -> sentence-pack inside
+        for piece in chunk_text_sentence(p, chunk_size, max(0, overlap // 2)):
+            if not cur:
+                cur = [piece]
+            elif cur_len_with(piece) <= chunk_size:
+                cur.append(piece)
+            else:
+                out.append("\n\n".join(cur))
+                cur = ([cur[-1]] if overlap > 0 else []) + [piece]
+
+    if cur:
+        out.append("\n\n".join(cur))
+    return out
+
+
+def make_chunks(text: str, chunk_size: int, overlap: int) -> list[str]:
+    mode = CHUNK_MODE
+    if mode == "sentence":
+        return chunk_text_sentence(text, chunk_size, overlap)
+    if mode == "paragraph":
+        return chunk_text_paragraph(text, chunk_size, overlap)
+    # default: your existing char-based splitter
+    return chunk_text(text, chunk_size, overlap)
 
 # -----------------------------
 # PDF → pages → [text per page]
 # -----------------------------
-def extract_text_by_page(pdf_path: str) -> List[str]:
-    pages_text: List[str] = []
-    for page_layout in extract_pages(pdf_path):
-        lines: List[str] = []
-        for element in page_layout:
-            if isinstance(element, LTTextContainer):
-                lines.append(element.get_text())
-        pages_text.append("".join(lines).strip())
-    return pages_text
+# at top
+
+def extract_text_by_page(pdf_path: str) -> list[str]:
+    if USE_BACKEND == "pymupdf":
+        # pip install pymupdf
+        import fitz
+        pages = []
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                # text from blocks preserves reading order better than raw
+                pages.append(page.get_text("text"))
+        return pages
+    elif USE_BACKEND == "pdfplumber":
+        # pip install pdfplumber
+        import pdfplumber
+        pages = []
+        with pdfplumber.open(pdf_path) as pdf:
+            for p in pdf.pages:
+                pages.append(p.extract_text() or "")
+        return pages
+    else:
+        # default: pdfminer (what you have today)
+        from pdfminer.high_level import extract_pages
+        from pdfminer.layout import LTTextContainer
+        out = []
+        for layout in extract_pages(pdf_path):
+            lines = []
+            for el in layout:
+                if isinstance(el, LTTextContainer):
+                    lines.append(el.get_text())
+            out.append("".join(lines).strip())
+        return out
+
 
 
 # -----------------------------
@@ -180,7 +371,7 @@ def main() -> None:
     # Build chunks and remember (page, chunk_idx, text)
     chunk_triplets: List[Tuple[int, int, str]] = []
     for page_idx, text in enumerate(pages_text, start=1):
-        chunks = chunk_text(text, args.chunk_size, args.overlap)
+        chunks = make_chunks(text, args.chunk_size, args.overlap)
         for ci, ch in enumerate(chunks):
             chunk_triplets.append((page_idx, ci, ch))
 
