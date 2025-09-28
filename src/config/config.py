@@ -2,6 +2,18 @@
 from pathlib import Path
 import os
 from dotenv import load_dotenv
+from dataclasses import dataclass
+
+@dataclass
+class Settings:
+    # Heroku sets DATABASE_URL automatically. Local dev default below.
+    database_url: str = os.getenv(
+        "DATABASE_URL",
+        "postgresql://postgres:postgres@localhost:5432/sfem"
+    )
+
+settings = Settings()
+
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
