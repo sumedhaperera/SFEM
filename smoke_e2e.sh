@@ -23,6 +23,10 @@ need python
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
+# make repo root importable so "from src..." works when running files under scripts/
+export PYTHONPATH="$ROOT_DIR"
+echo "[env] PYTHONPATH=$PYTHONPATH"
+
 
 # --- 2) Start Postgres (once)
 if ! docker ps --format '{{.Names}}' | grep -q '^sfem-pg$'; then
