@@ -27,3 +27,10 @@ blingfire==0.1.8
 pysbd==0.3.4
 pymupdf==1.24.10     # if you’ll use PDF_BACKEND=pymupdf
 pdfplumber==0.11.4   # if you’ll use PDF_BACKEND=pdfplumber
+
+#phase 1
+beautifulsoup4>=4.12.3
+lxml>=5.2.2
+requests>=2.32.3
+tqdm>=4.66.5
+qdrant-client>=1.9.3
