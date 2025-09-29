@@ -21,12 +21,32 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1"; exit 1; }; }
 need docker
 need python
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$ROOT_DIR"
-# make repo root importable so "from src..." works when running files under scripts/
-export PYTHONPATH="$ROOT_DIR"
+# --- 1.5) Find repo root (works if this file is at repo root OR under scripts/)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Prefer a directory that actually contains src/
+if [ -d "$SCRIPT_DIR/src" ]; then
+  REPO_ROOT="$SCRIPT_DIR"
+elif [ -d "$SCRIPT_DIR/../src" ]; then
+  REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+elif [ -d "$SCRIPT_DIR/../../src" ]; then
+  REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+else
+  # As a last resort, try git (if available)
+  if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
+    REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+  else
+    echo "[env] ERROR: could not locate repo root (no src/ found near $SCRIPT_DIR)."
+    echo "       Move this script into the repo or adjust PYTHONPATH manually."
+    exit 1
+  fi
+fi
+
+cd "$REPO_ROOT"
+export PYTHONPATH="$REPO_ROOT"
+echo "[env] REPO_ROOT=$REPO_ROOT"
 echo "[env] PYTHONPATH=$PYTHONPATH"
 
+section(){ echo; echo "=== $*"; }
 
 # --- 2) Start Postgres (once)
 if ! docker ps --format '{{.Names}}' | grep -q '^sfem-pg$'; then
@@ -92,6 +112,11 @@ if [ -f "requirements.txt" ]; then
   echo "[pip] installing requirements"
   python -m pip install -r requirements.txt
 fi
+# Phase-1 minimal deps (crawler / upserter)
+if [ -f "requirements.phase1.txt" ]; then
+  echo "[pip] installing requirements.phase1.txt"
+  python -m pip install -r requirements.phase1.txt
+fi
 
 # --- 5) Create DB schema
 echo "[db] init schema"
@@ -109,7 +134,7 @@ fi
 echo "[seed] seeding errors from $SAMPLE_JSONL"
 python scripts/seed_sample_errors.py --from-json "$SAMPLE_JSONL"
 
-# --- 7) Build embeddings / index PDF
+# --- 7) Build embeddings / index PDF (existing path retained)
 PDF_PATH="docs/automate_your_business_processes_9-14-2025.pdf"
 OUT_DIR="index/flow_docs_safe"
 mkdir -p index
@@ -120,6 +145,42 @@ python -m src.embeddings.pdf_chunk_index_pdfminer \
   --pdf "$PDF_PATH" \
   --doc-id flow_manual \
   --out "$OUT_DIR"
+
+# --- 7.5) Phase-1 Canonical + Fresh (Salesforce Help + Release Notes) → JSONL → Qdrant
+section "Phase-1 Canonical + Fresh"
+FLOW_JSONL="data/sf_flow_chunks.smoke.jsonl"
+RN_JSONL="data/flow_releasenotes.smoke.jsonl"
+mkdir -p data
+
+echo "[phase1] crawling Flow docs (seeded, small for smoke)"
+FLOW_SEEDS=(
+  'https://developer.salesforce.com/docs/atlas.en-us.flow.meta/flow/flow_overview.htm'
+  'https://developer.salesforce.com/docs/atlas.en-us.flow.meta/flow/flow_build.htm'
+)
+python phase1_ingestion/crawl_sf_flow.py \
+  --seeds "${FLOW_SEEDS[@]}" \
+  --path-prefix "/docs/atlas.en-us.flow.meta/flow/" \
+  --max-pages 5 \
+  --out "$FLOW_JSONL"
+
+echo "[phase1] ingesting Flow release notes (seeded)"
+RN_SEEDS=(
+  'https://help.salesforce.com/s/articleView?id=release-notes.rn_automate_flow_builder.htm&language=en_US&release=258&type=5'
+  'https://help.salesforce.com/s/articleView?id=release-notes.rn_automate_flow_builder_screen_flows.htm&language=en_US&release=258&type=5'
+)
+python phase1_ingestion/release_notes_ingest.py \
+  --seeds "${RN_SEEDS[@]}" \
+  --out "$RN_JSONL" \
+  --debug-dump 1
+
+echo "[phase1] line counts"
+wc -l "$FLOW_JSONL" || true
+wc -l "$RN_JSONL"   || true
+
+echo "[phase1] upserting JSONL to Qdrant (project embedder + config)"
+python -m src.qdrant.upsert_jsonl --in "$FLOW_JSONL" "$RN_JSONL" || {
+  echo "[phase1] WARN: upsert failed or empty; continuing smoke"
+}
 
 # --- 8) End-to-end test script
 echo "[test] running test/run_e2e_full.py"
