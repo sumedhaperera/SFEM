@@ -151,8 +151,8 @@ export PYTHONPATH=.
 python test/run_e2e_full.py --limit 20 --org-id "${SMOKE_ORG_ID}" --require-hits 1 --with-docs
 
 # --- 9) LLM smoke (persists mitigations; falls back if no API key)
-#echo "[llm] running RAG generate to persist mitigations"
-#python -m src.llm.rag_generate --limit 3 --with-docs --org-id "${SMOKE_ORG_ID}"
+echo "[llm] running RAG generate to persist mitigations"
+python -m src.llm.rag_generate --limit 3 --with-docs --org-id "${SMOKE_ORG_ID}"
 
 # --- 10) verify persistence (for the test org)
 echo "[verify] checking mitigations for org=${SMOKE_ORG_ID}"
