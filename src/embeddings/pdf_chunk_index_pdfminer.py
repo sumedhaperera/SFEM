@@ -8,6 +8,7 @@ import json
 import re
 from pathlib import Path
 from typing import Iterable, List, Tuple, Dict, Any
+from datetime import datetime, timezone
 
 # --- PDF extraction (pdfminer.six) ---
 from pdfminer.high_level import extract_pages
@@ -27,6 +28,14 @@ _QDRANT_NS = uuid.UUID("800cd911-c69f-46d9-8407-2908c94a6d65")
 # ------------------------
 # Utilities
 # ------------------------
+def _file_mtime_iso(p) -> str:
+    """Return file mtime in ISO-8601 UTC with trailing Z."""
+    try:
+        ts = p.stat().st_mtime  # Path-like
+    except Exception:
+        ts = os.path.getmtime(str(p))  # fallback for str paths
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
 def _clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
@@ -141,24 +150,32 @@ def build_pdf_chunks(
         parts = _split_chunks(page_text, max_chars=1200)
         if not parts:
             continue
+        # compute once per file (or per page if you prefer)
+        doc_ts = _file_mtime_iso(pdf_path)
+
         for j, text in enumerate(parts):
             raw_id = f"pdf:{doc_id}:p{page_no}:{j}"
             pid = _coerce_point_id(raw_id)
             rec = {
-                "id": str(pid),  # keep as string for consistency
-                "sid": raw_id,   # original string id for traceability
+                "id": str(pid),
+                "sid": raw_id,
                 "doc_id": doc_id,
+                "chunk_id": raw_id,              # << helps citations
                 "url": file_url,
                 "title": title,
                 "headings_path": [f"Page {page_no}"],
                 "anchor": None,
                 "text": text,
-                "source": "pdf_manual",
+                "source": "pdf_manual",          # << matches your source filter
                 "product": "flow",
+                "org_id": "global",              # << shared across tenants
+                "doc_ts": doc_ts,                # << for freshness
                 "page": page_no,
                 "chunk_index": j,
             }
             records.append(rec)
+
+
 
     return records
 

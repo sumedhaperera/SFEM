@@ -8,7 +8,7 @@ import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
-from src.qdrant.utils import get_client, ensure_collection  # respects QDRANT_URL/API key etc.
+from src.qdrant.utils import get_client, ensure_collection
 from src.embeddings.embed import get_embedder
 from src.config.config import QDRANT_COLLECTION
 
@@ -31,7 +31,7 @@ def _distance():
     return qm.Distance.COSINE
 
 # -----------------------
-# Freshness helpers (optional; safe no-op if no _error_date passed)
+# Freshness helpers (optional)
 # -----------------------
 try:
     from src.config.config import (
@@ -47,18 +47,15 @@ except Exception:
 _QDRANT_NS = uuid.UUID("800cd911-c69f-46d9-8407-2908c94a6d65")
 
 def _coerce_point_id(raw) -> str | int:
-    """Return Qdrant-friendly point id (str UUID or int)."""
     if isinstance(raw, int):
         return raw
     s = str(raw) if raw is not None else None
     if not s:
         return str(uuid.uuid5(_QDRANT_NS, "auto:" + os.urandom(8).hex()))
-    # already a UUID string?
     try:
         return str(uuid.UUID(s))
     except Exception:
         return str(uuid.uuid5(_QDRANT_NS, s))
-
 
 def _as_ts(val) -> float | None:
     if val is None:
@@ -83,7 +80,6 @@ def _time_boost(error_ts: float | None, doc_ts: float | None, tau_days: float) -
     return math.exp(-delta_days / max(tau_days, 1e-6))
 
 def _fresh_rescore(points, error_ts: float | None):
-    """Reorder Qdrant scored points with a small time-aware boost."""
     if error_ts is None:
         return points
     tau = float(FRESH_TIME_DECAY_DAYS)
@@ -93,11 +89,11 @@ def _fresh_rescore(points, error_ts: float | None):
     rescored = []
     for p in points:
         pl = p.payload or {}
-        doc_ts = pl.get("doc_ts")  # may be None (safe)
-        tb = _time_boost(error_ts, doc_ts, tau)  # 0..1
+        doc_ts = pl.get("doc_ts")
+        ts = _as_ts(doc_ts) if isinstance(doc_ts, (str, int, float)) else None
+        tb = _time_boost(error_ts, ts, tau)
         src_mult = rn_mult if pl.get("source") == "sf_release_notes" else 1.0
         new_score = (p.score or 0.0) + alpha * tb * src_mult
-        # optional observability:
         pl.setdefault("_time_boost", tb)
         pl.setdefault("_rescored", True)
         rescored.append((new_score, p))
@@ -123,8 +119,10 @@ class QdrantRetriever:
         """
         Embed and upsert a list of chunk dicts (must include 'text').
         Returns the number of points upserted.
+
+        NOTE: If no 'org_id' is provided, we default to 'global' so global
+        corpora (Flow help / release notes / manuals / KB) are shared.
         """
-        # Normalize input records
         records = []
         for ch in chunks or []:
             if isinstance(ch, dict):
@@ -133,7 +131,6 @@ class QdrantRetriever:
                     continue
                 rec = dict(ch)
             else:
-                # fallback: try tuple/list like (id?, ..., text)
                 try:
                     text = ch[-1]
                 except Exception:
@@ -141,40 +138,36 @@ class QdrantRetriever:
                 if not isinstance(text, str) or not text.strip():
                     continue
                 rec = {"text": text}
+
             rec.setdefault("source", rec.get("source") or "kb_seed")
+            rec.setdefault("org_id", "global")  # << default for shared corpora
+    
             raw_id = rec.get("id") or rec.get("sid") or rec.get("url") \
-                    or rec.get("doc_id") or rec.get("chunk_id") or rec["text"][:64]
+                  or rec.get("doc_id") or rec.get("chunk_id") or rec["text"][:64]
             rec["id"] = _coerce_point_id(raw_id)
-            # keep original string id for traceability
             if raw_id is not None:
                 rec.setdefault("sid", str(raw_id))
-            # avoid bloating payload
             rec.pop("html", None)
             records.append(rec)
 
         if not records:
             return 0
 
-        # Embed
         texts = [r["text"] for r in records]
         vecs = self.embedder(texts)
 
-        # Ensure Qdrant collection matches embedding dim
         probe = vecs[0]
         dim = probe.shape[-1] if hasattr(probe, "shape") else len(probe)
         ensure_collection(dim)
 
-        # Build points
         points: list[qm.PointStruct] = []
         for r, v in zip(records, vecs):
             points.append(qm.PointStruct(id=r["id"], vector=v, payload=r))
 
-        # Upsert in batches
         for i in range(0, len(points), batch):
             self.client.upsert(collection_name=self.collection, points=points[i:i+batch])
 
         return len(points)
-
 
     def search(
         self,
@@ -182,32 +175,35 @@ class QdrantRetriever:
         top_k: int = 5,
         org_id: Optional[str] = None,
         extra_filters: Optional[Dict[str, Any]] = None,
-    ) -> List[Tuple[int, float, str]]:
-        """
-        Returns: List[(chunk_id, score, text)]
-        """
+    ) -> List[Tuple[int, float, str, Dict[str, Any]]]:
         qv = self.embed([query])[0].astype(np.float32)
 
-        # pull special control key (not sent to Qdrant)
-        error_date = None
-        if extra_filters and "_error_date" in extra_filters:
-            error_date = extra_filters.pop("_error_date")
+        xfilters = dict(extra_filters or {})
+        error_date = xfilters.pop("_error_date", None)
 
-        must: list[qm.FieldCondition] = []
+        must: List[qm.FieldCondition] = []
+        for k, v in xfilters.items():
+            if v is None:
+                continue
+            if isinstance(v, (list, tuple, set)):
+                must.append(qm.FieldCondition(key=k, match=qm.MatchAny(any=list(v))))
+            else:
+                must.append(qm.FieldCondition(key=k, match=qm.MatchValue(value=v)))
+
+        should: List[qm.Condition] = []
         if org_id:
-            must.append(qm.FieldCondition(key="org_id", match=qm.MatchValue(value=org_id)))
-        if extra_filters:
-            for k, v in extra_filters.items():
-                if v is None:
-                    continue
-                if isinstance(v, (list, tuple, set)):
-                    must.append(qm.FieldCondition(key=k, match=qm.MatchAny(any=list(v))))
-                else:
-                    must.append(qm.FieldCondition(key=k, match=qm.MatchValue(value=v)))
-        flt = qm.Filter(must=must) if must else None
+            should.extend([
+                qm.FieldCondition(key="org_id", match=qm.MatchValue(value=org_id)),
+                qm.FieldCondition(key="org_id", match=qm.MatchValue(value="global")),
+            ])
+            try:
+                should.append(qm.IsNullCondition(is_null=qm.PayloadField(key="org_id")))
+            except AttributeError:
+                pass
 
-        # fetch a slightly larger pool so freshness can reorder
-        pool = max(int(top_k), 20)
+        flt = qm.Filter(must=must, should=should) if (must or should) else None
+
+        pool = max(int(top_k) * 4, 20)
         try:
             res = self.client.search(
                 self.collection,
@@ -227,13 +223,11 @@ class QdrantRetriever:
                 with_vectors=False,
             )
 
-        # time-aware re-rank (order only)
         error_ts = _as_ts(error_date)
         ranked_pts = _fresh_rescore(res, error_ts) if error_ts is not None else res
 
-        # normalize score for Euclid (your existing behavior)
         dist = _distance()
-        out: List[Tuple[int, float, str]] = []
+        out: List[Tuple[int, float, str, Dict[str, Any]]] = []
         for pt in ranked_pts[: int(top_k)]:
             score = float(pt.score)
             if dist == qm.Distance.EUCLID:
@@ -245,5 +239,5 @@ class QdrantRetriever:
                 idx = int(cid) if cid is not None else -1
             except Exception:
                 idx = -1
-            out.append((idx, score, text))
+            out.append((idx, score, text, payload))
         return out
