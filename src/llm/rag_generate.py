@@ -78,7 +78,6 @@ def main():
     retriever = get_retriever()  # QdrantRetriever (factory)
 
     for r in rows:
-        # be defensive: use .get() to avoid KeyError if a field is missing
         err_msg = r.get("error_message") or r.get("message") or ""
         ctx = {
             "org_id": r.get("org_id"),
@@ -95,12 +94,28 @@ def main():
 
         query = build_query(ctx)
 
-        # Qdrant search via factory (tenant-aware if you set org_id during upsert)
+        # Pick the best available timestamp from the DB row
+        error_date = (
+            r.get("occurred_at")
+            or r.get("created_at")
+            or r.get("updated_at")
+        )
+
+        # Build filters + pass the freshness control key
+        extra = {
+            # keep whatever Qdrant payload filters you already use
+            "source": ["sf_help", "sf_release_notes", "pdf_manual"],
+        }
+        if error_date:
+            # special key consumed by the retriever's freshness re-rank
+            extra["_error_date"] = error_date   # can be datetime or ISO string
+
+        # Qdrant search via factory (tenant-aware if you upserted with org_id)
         hits: List[Tuple[int, float, str]] = retriever.search(
             query=query,
             top_k=TOP_K,
-            org_id=ctx.get("org_id"),    # use filters if you upserted with org_id
-            extra_filters=None            # e.g., {"object": "Contact", "field": "Email"}
+            org_id=ctx.get("org_id"),
+            extra_filters=extra
         )
 
         # Include knowledge unless you later add a --no-docs toggle

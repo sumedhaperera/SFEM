@@ -1,6 +1,6 @@
 # phase1_ingestion/release_notes_ingest.py
 from __future__ import annotations
-import argparse, json, os, hashlib
+import argparse, json, os, hashlib, re
 from datetime import datetime, timezone
 from typing import List, Dict
 from urllib.parse import urlparse
@@ -8,7 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 from html_chunker import chunk_article  # uses your updated chunker
-
+import email.utils as eut
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -16,6 +16,21 @@ HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     )
 }
+
+def _to_ts(val: str | None) -> float | None:
+    if not val: return None
+    try:
+        return datetime.fromisoformat(val.replace("Z","+00:00")).timestamp()
+    except Exception:
+        try:
+            return eut.parsedate_to_datetime(val).timestamp()
+        except Exception:
+            return None
+
+def _release_number_from_url(url: str) -> int | None:
+    m = re.search(r"[?&]release=(\d+)\b", url)
+    return int(m.group(1)) if m else None
+
 
 def fetch(u: str) -> str:
     r = requests.get(u, headers=HEADERS, timeout=25)
@@ -64,6 +79,8 @@ def ingest(args):
                 lastmod = m["content"]; break
 
         chunks, meta = chunk_article(html)
+        rel_num = _release_number_from_url(url)
+        doc_ts = _to_ts(lastmod) or datetime.now(timezone.utc).timestamp()
 
         wrote = 0
         for ch in chunks:
@@ -79,6 +96,8 @@ def ingest(args):
                 "product": "flow",
                 "release_train": meta.get("release_train"),
                 "lastmod": lastmod,
+                "doc_ts": doc_ts,                  
+                "release_number": rel_num,         
                 "crawl_ts": crawl_ts,
             }, ensure_ascii=False) + "\n")
             wrote += 1

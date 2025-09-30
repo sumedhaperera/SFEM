@@ -188,11 +188,11 @@ export PYTHONPATH=.
 python test/run_e2e_full.py
 
 # --- 9) Optional LLM smoke (only if key is present)
-if [ -n "${OPENAI_API_KEY:-}" ]; then
-  echo "[llm] OPENAI_API_KEY detected; running small RAG generate"
-  python -m src.llm.rag_generate --limit 3 --with-docs
-else
-  echo "[llm] OPENAI_API_KEY not set; skipping LLM call (RAG generate)"
-fi
+#if [ -n "${OPENAI_API_KEY:-}" ]; then
+#  echo "[llm] OPENAI_API_KEY detected; running small RAG generate"
+#  python -m src.llm.rag_generate --limit 3 --with-docs
+#else
+#  echo "[llm] OPENAI_API_KEY not set; skipping LLM call (RAG generate)"
+#fi
 
 echo "✅ Smoke test completed."

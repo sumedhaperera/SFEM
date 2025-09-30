@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup, Tag
 from urllib import robotparser
 from tqdm import tqdm
 import re
+import email.utils as eut
 
 # --- robust user-agent ---
 HEADERS = {
@@ -22,6 +23,21 @@ HEADERS = {
 
 # ---------------- Chunker (inline, no external import) ----------------
 HEADING_TAGS = ["h1", "h2", "h3"]
+
+def _to_ts(iso_or_httpdate: str | None) -> float | None:
+    if not iso_or_httpdate:
+        return None
+    # try ISO
+    try:
+        return datetime.fromisoformat(iso_or_httpdate.replace("Z","+00:00")).timestamp()
+    except Exception:
+        pass
+    # try HTTP-date (rare)
+    try:
+        return eut.parsedate_to_datetime(iso_or_httpdate).timestamp()
+    except Exception:
+        return None
+
 
 def _clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
@@ -234,6 +250,7 @@ def crawl(args):
             if txt:
                 chunks = [{"headings_path": ["(untitled)"], "anchor": None, "text": txt}]
 
+        doc_ts = _to_ts(lastmod) or datetime.now(timezone.utc).timestamp()
         # Write chunks
         wrote_any = False
         for ch in chunks:
@@ -251,6 +268,7 @@ def crawl(args):
                         "product": "flow",
                         "release_train": meta.get("release_train"),
                         "lastmod": lastmod,
+                        "doc_ts": doc_ts, 
                         "anchors": meta.get("anchors") or [],
                         "crawl_ts": ts,
                     },

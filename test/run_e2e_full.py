@@ -7,10 +7,13 @@ import json
 import time
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
-
+from src.db.db import list_recent_errors
+from src.retrievers.factory import get_retriever
 # Ensure project root on path
 THIS = Path(__file__).resolve()
 ROOT = THIS.parents[1]
+
+
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -36,7 +39,7 @@ from pdfminer.high_level import extract_text as pdfminer_extract_text
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-
+TOP_K = int(os.getenv("RETRIEVER_TOP_K", "5"))
 # ----------------- Helpers -----------------
 
 SAMPLE_PLAYBOOKS = [
@@ -217,35 +220,76 @@ def build_query(ctx: Dict[str, Any]) -> str:
     sig_guess = ctx.get("error_message","").split(":",1)[0].split(" on ")[0]
     return f"{sig_guess} {ctx.get('flow_name')} v{ctx.get('flow_version')} element {ctx.get('flow_element')} :: {ctx.get('error_message')}"
 
-def mitigate_errors(limit: int, org_id_override: str | None):
-    rows = list_recent_errors(limit=limit)
-    if not rows:
-        print("[warn] No errors in DB. Skipping mitigation. (Run seed_sample_errors.py to add samples.)")
-        return
+def _getf(row, key, default=None):
+    """Safe field getter for dicts or objects."""
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return getattr(row, key, default)
 
-    retriever = get_retriever()
+def _list_recent_errors_compat(limit: int, org_id: str | None):
+    """
+    Works with both list_recent_errors(limit) and list_recent_errors(limit, org_id=...).
+    If the DB helper doesn't support org_id, we filter in-memory.
+    """
+    try:
+        # new signature (kw)
+        return list_recent_errors(limit=limit, org_id=org_id)
+    except TypeError:
+        try:
+            # maybe positional-only "limit"
+            rows = list_recent_errors(limit=limit)
+        except TypeError:
+            # legacy: no params
+            rows = list_recent_errors()
+        if org_id:
+            # in-memory filter if the DB helper didn't support org_id
+            def _getf(row, key, default=None):
+                if isinstance(row, dict):
+                    return row.get(key, default)
+                return getattr(row, key, default)
+            rows = [r for r in rows if _getf(r, "org_id") == org_id]
+        return rows
+
+def mitigate_errors(limit: int, org_id_override: str | None = None, *, retriever):
+    rows = _list_recent_errors_compat(limit=limit, org_id=org_id_override)
 
     for r in rows:
+        err_msg = _getf(r, "error_message") or _getf(r, "message") or ""
         ctx = {
-            "org_id": r["org_id"],
-            "flow_name": r["flow_name"],
-            "flow_version": r["flow_version"],
-            "flow_element": r["flow_element"],
-            "error_message": r["error_message"],
-            "created_at": r["created_at"],
+            "org_id": _getf(r, "org_id"),
+            "flow_name": _getf(r, "flow_name"),
+            "flow_version": _getf(r, "flow_version"),
+            "flow_element": _getf(r, "flow_element"),
+            "error_message": err_msg,
+            "created_at": _getf(r, "created_at"),
         }
-        print("="*80)
-        print(f"FLOW: {ctx['flow_name']} (v{ctx['flow_version']}) | ELEMENT: {ctx['flow_element']}")
-        print(f"ERROR: {ctx['error_message']}")
-        print("-"*80)
+
+        print("=" * 80)
+        print(f"FLOW: {ctx.get('flow_name')} (v{ctx.get('flow_version')}) | ELEMENT: {ctx.get('flow_element')}")
+        print(f"ERROR: {ctx.get('error_message')}")
+        print("-" * 80)
 
         query = build_query(ctx)
-        hits = retriever.search(
+
+        # Pick the best available timestamp and pass it to retriever as freshness signal
+        error_date = _getf(r, "occurred_at") or _getf(r, "created_at") or _getf(r, "updated_at")
+
+        extra_filters = {
+            "source": ["sf_help", "sf_release_notes", "pdf_manual"],  # keep your existing payload filters
+        }
+        if error_date:
+            extra_filters["_error_date"] = error_date  # retriever uses this for time-aware re-rank
+
+        org_id = org_id_override or _getf(r, "org_id")
+
+        hits: list[tuple[int, float, str]] = retriever.search(
             query=query,
-            top_k=int(os.getenv("TOP_K", "5")),
-            org_id=org_id_override or ctx["org_id"],
-            extra_filters=None
+            top_k=TOP_K,
+            org_id=org_id,
+            extra_filters=extra_filters,
         )
+        # ... your existing handling of `hits` (formatting, generation, etc.)
+
         knowledge = "\n\n".join([t for (_,_,t) in hits][:5]) if hits else ""
 
         prompt = PROMPT_TMPL.format(
@@ -299,7 +343,8 @@ def main():
     seed_sample_errors_if_present(ROOT)
 
     # 5) Mitigate recent errors end-to-end
-    mitigate_errors(limit=args.limit, org_id_override=None)
+    retriever = get_retriever()   # build it once
+    mitigate_errors(limit=args.limit, org_id_override=None, retriever=retriever)
 
     print("[done] End-to-end test complete.")
 

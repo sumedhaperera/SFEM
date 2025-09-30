@@ -36,3 +36,11 @@ INDEX_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DB.parent.mkdir(parents=True, exist_ok=True)
 
 EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+
+# --- Freshness knobs (time-aware rerank) ---
+# how quickly the time boost decays (days); 60 = ~2-month window
+FRESH_TIME_DECAY_DAYS = int(os.getenv("FRESH_TIME_DECAY_DAYS", "60"))
+# how much weight to give the time boost (0..1)
+FRESH_BOOST_ALPHA = float(os.getenv("FRESH_BOOST_ALPHA", "0.25"))
+# extra multiplier for release notes (they're strong signals of breaking changes)
+FRESH_RN_MULTIPLIER = float(os.getenv("FRESH_RN_MULTIPLIER", "1.25"))
