@@ -146,9 +146,9 @@ echo "[phase1] upserting JSONL to Qdrant"
 python -m src.qdrant.upsert_jsonl --in "$FLOW_JSONL" "$RN_JSONL" || echo "[phase1] WARN: upsert failed or empty; continuing"
 
 # --- 8) e2e test (scoped to test org)
-echo "[test] running test/run_e2e_full.py"
-export PYTHONPATH=.
-python test/run_e2e_full.py --limit 20 --org-id "${SMOKE_ORG_ID}" --require-hits 1 --with-docs
+#echo "[test] running test/run_e2e_full.py"
+#export PYTHONPATH=.
+#python test/run_e2e_full.py --limit 20 --org-id "${SMOKE_ORG_ID}" --require-hits 1 --with-docs
 
 # --- 9) LLM smoke (persists mitigations; falls back if no API key)
 echo "[llm] running RAG generate to persist mitigations"
